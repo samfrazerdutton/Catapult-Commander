@@ -70,7 +70,7 @@ export default function CatapultCommanderV24() {
      const dirY = v > 0 ? (vy/v) : 0;
 
      const ax = -(Fd * dirX + p.wind) / p.projMass;
-     const ay = -(Fd * dirY) / p.projMass - 9.81;
+     const ay = -(Fd * (vy/v)) / p.projMass - 9.81;
      
      state.vel.x += ax * dt;
      state.vel.y += ay * dt;
@@ -108,9 +108,6 @@ export default function CatapultCommanderV24() {
           pos: launchPos, 
           vel: { x: Math.cos(rad) * v0, y: Math.sin(rad) * v0, z: 0 }
         };
-        
-        // Add X-offset from arm swing to simulation
-        // (Crucial for low angles/long arms)
         
         for(let i=0; i<3000; i++) {
            sim = runPhysicsStep(sim, specs, dt);
@@ -176,20 +173,23 @@ export default function CatapultCommanderV24() {
     engineRef.current?.reset();
   };
 
-  // --- 3D Engine ---
+  // --- 3D Engine Initialization ---
   useEffect(() => {
     let frameId, isMounted = true, resizeObserver;
     const init = async () => {
       try {
         const THREE = await loadThreeJS();
         if (!isMounted || !containerRef.current) return;
+        
         const width = containerRef.current.clientWidth;
         const height = containerRef.current.clientHeight;
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(COLORS.bg);
         scene.fog = new THREE.FogExp2(COLORS.bg, 0.002);
+        
         const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 5000);
         camera.position.set(-50, 40, 0); camera.lookAt(0, 10, 0);
+        
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(width, height);
         renderer.shadowMap.enabled = true;
@@ -201,6 +201,7 @@ export default function CatapultCommanderV24() {
         const sun = new THREE.DirectionalLight(0xffffff, 1.2);
         sun.position.set(-50, 100, 50); sun.castShadow = true;
         sun.shadow.mapSize.set(2048, 2048); scene.add(sun);
+        
         const grid = new THREE.GridHelper(5000, 250, COLORS.grid, 0x0f172a);
         grid.position.y = 0.1; scene.add(grid);
         const floor = new THREE.Mesh(new THREE.PlaneGeometry(10000, 10000), new THREE.MeshStandardMaterial({ color: 0x050b14, roughness: 0.8 }));
@@ -242,7 +243,7 @@ export default function CatapultCommanderV24() {
 
         const state = {
           phase: "READY", pos: new THREE.Vector3(0,0,0), vel: new THREE.Vector3(0,0,0),
-          theta: -Math.PI / 4, omega: 0, time: 0, trail: [],
+          theta: -Math.PI / 4, omega: 0, alpha: 0, trail: [], time: 0,
           camera: { radius: 80, theta: Math.PI/4, phi: Math.PI/3, center: new THREE.Vector3(0,10,0), dragging: false, lastMouse: {x:0, y:0} }
         };
 
@@ -284,8 +285,9 @@ export default function CatapultCommanderV24() {
           frameId = requestAnimationFrame(animate);
           if (!engineRef.current) return;
           const p = engineRef.current.specs;
-          const dt = 0.016;
+          const dt = 0.016; 
           
+          // Visual scaling
           const len = p.armLength;
           armBeam.scale.set(len, 1, 1); armBeam.position.set(-len/2, 0, 0); cup.position.set(-len, 0.8, 0);
           
@@ -320,14 +322,10 @@ export default function CatapultCommanderV24() {
                   Math.sin(rad) * vLaunch, 
                   0
                 );
-                // SNAPSHOT: Ensure exact sync with solver start pos
-                const launchPos = getCupPos(state.theta);
-                state.pos.copy(launchPos);
-                projectile.position.copy(launchPos);
-             } else {
-                armPivot.rotation.z = state.theta;
-                projectile.position.copy(getCupPos(state.theta));
+                state.pos.copy(projectile.position);
              }
+             armPivot.rotation.z = state.theta;
+             projectile.position.copy(getCupPos(state.theta));
           } 
           else if (state.phase === "FLIGHT") {
              state.time += dt;
@@ -347,6 +345,7 @@ export default function CatapultCommanderV24() {
              }
           }
 
+          // Camera
           const cx = state.camera.radius * Math.sin(state.camera.phi) * Math.sin(state.camera.theta);
           const cy = state.camera.radius * Math.cos(state.camera.phi);
           const cz = state.camera.radius * Math.sin(state.camera.phi) * Math.cos(state.camera.theta);
@@ -401,7 +400,9 @@ export default function CatapultCommanderV24() {
                  <div className="p-3 bg-slate-950 rounded border border-slate-800 space-y-3 relative overflow-hidden">
                     {solverState === "CALCULATING" && <div className="absolute inset-0 bg-cyan-500/10 animate-pulse"></div>}
                     <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase relative z-10"><span>Tactical Computer</span><Cpu className={`w-3 h-3 ${solverState === "LOCKED" ? "text-emerald-500" : "text-slate-600"}`} /></div>
+                    
                     {autoCorrected && <div className="text-[9px] text-amber-400 flex items-center"><AlertTriangle className="w-3 h-3 mr-1" /> Angle auto-corrected for range.</div>}
+                    
                     <button onClick={runOptimizer} disabled={solverState === "CALCULATING"} className={`w-full py-2 rounded text-[10px] font-bold flex items-center justify-center space-x-2 transition-all relative z-10 ${solverState === "LOCKED" ? "bg-emerald-900/30 text-emerald-400 border border-emerald-500/50" : "bg-cyan-600 hover:bg-cyan-500 text-white"}`}>{solverState === "CALCULATING" ? <RefreshCw className="w-3 h-3 animate-spin"/> : solverState === "LOCKED" ? <CheckCircle2 className="w-3 h-3"/> : <Activity className="w-3 h-3"/>}<span>{solverState === "LOCKED" ? "TARGET LOCKED" : "CALCULATE SOLUTION"}</span></button>
                  </div>
                  <div className="space-y-3 pt-2"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Mission Variables</h3><InputSlider label="Angle" value={specs.angle} min={10} max={80} onChange={v => setSpecs({...specs, angle: v})} unit="°" /><InputSlider label="Wind" value={specs.wind} min={-20} max={20} onChange={v => setSpecs({...specs, wind: v})} unit="m/s" color="text-red-400" /></div>
@@ -411,13 +412,13 @@ export default function CatapultCommanderV24() {
               <div className="space-y-5 animate-in fade-in slide-in-from-right-2">
                  <div className="p-3 bg-amber-900/10 border border-amber-500/20 rounded text-[10px] text-amber-200/80 leading-relaxed">Engineering Deck: Modifying these values alters the catapult's physics model.</div>
                  <div className="space-y-3"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Structural Specs</h3><InputSlider label="Arm Length" value={specs.armLength} min={3} max={10} step={0.5} onChange={v => setSpecs({...specs, armLength: v})} unit="m" color="text-amber-400" /><InputSlider label="Arm Mass" value={specs.armMass} min={10} max={100} onChange={v => setSpecs({...specs, armMass: v})} unit="kg" color="text-amber-400" /></div>
-                 <div className="space-y-3 pt-4 border-t border-slate-800"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Power Train</h3><InputSlider label="Tension" value={specs.tension} min={1000} max={200000} step={100} onChange={v => setSpecs({...specs, tension: v})} unit="N" color="text-emerald-400" /><InputSlider label="Payload Mass" value={specs.projMass} min={1} max={50} onChange={v => setSpecs({...specs, projMass: v})} unit="kg" /></div>
+                 <div className="space-y-3 pt-4 border-t border-slate-800"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Power Train</h3><InputSlider label="Tension" value={specs.tension} min={1000} max={50000} step={100} onChange={v => setSpecs({...specs, tension: v})} unit="N" color="text-emerald-400" /><InputSlider label="Payload Mass" value={specs.projMass} min={1} max={50} onChange={v => setSpecs({...specs, projMass: v})} unit="kg" /></div>
               </div>
             )}
             {activeTab === "LOGS" && (
               <div className="space-y-3 animate-in fade-in slide-in-from-right-2">
                  <div className="flex justify-between items-center"><h3 className="text-[10px] font-bold text-emerald-500 uppercase">Flight Data</h3><button onClick={() => setFlightLogs([])} className="text-slate-500 hover:text-red-400"><Trash2 className="w-3 h-3" /></button></div>
-                 {flightLogs.length === 0 ? <div className="text-center text-slate-600 text-[10px] py-10 italic">No flight data recorded.</div> : <div className="space-y-2 max-h-[400px] overflow-y-auto">{flightLogs.map((log, i) => (<div key={log.id} className="bg-slate-950 border border-slate-800 rounded p-2 text-[10px] flex justify-between items-center"><span className="text-slate-500 font-mono w-4">#{i+1}</span><div><div className="text-white font-bold">{log.range}m</div><div className="text-slate-500">T:{log.tension} | A:{log.angle}°</div></div><div className={`font-mono font-bold ${Math.abs(log.error) < 3 ? "text-emerald-400" : "text-red-400"}`}>{log.error > 0 ? "+" : ""}{log.error}m</div></div>))}</div>}
+                 {flightLogs.length === 0 ? <div className="text-center text-slate-600 text-[10px] py-10 italic">No flight data recorded.</div> : <div className="space-y-2 max-h-[400px] overflow-y-auto">{flightLogs.map((log, i) => (<div key={log.id} className="bg-slate-950 border border-slate-800 rounded p-2 text-[10px] flex justify-between items-center"><span className="text-slate-500 font-mono w-4">#{i+1}</span><div><div className="text-white font-bold">{log.range}m</div><div className="text-slate-500">T:{log.tension} | A:{log.angle}°</div></div><div className={`font-mono font-bold ${Math.abs(log.error) < 5 ? "text-emerald-400" : "text-red-400"}`}>{log.error > 0 ? "+" : ""}{log.error}m</div></div>))}</div>}
               </div>
             )}
          </div>

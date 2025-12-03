@@ -11,7 +11,5 @@ Lab Tab: Customize mechanical specs.
 
 Logs Tab: Review accuracy data.
 
-Camera Button: Toggle between "Free Cam" and "Tracking Cam".
-
 🛡️ License
 Open Source. Distributed under the MIT License.

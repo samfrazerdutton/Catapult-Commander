@@ -30,7 +30,7 @@ const loadThreeJS = () => new Promise((resolve, reject) => {
   document.body.appendChild(script);
 });
 
-export default function CatapultCommanderV23() {
+export default function CatapultCommanderV24() {
   const [activeTab, setActiveTab] = useState("MISSION"); 
   const [panelOpen, setPanelOpen] = useState(true);
   const [simState, setSimState] = useState("READY"); 
@@ -55,148 +55,120 @@ export default function CatapultCommanderV23() {
   const containerRef = useRef(null);
   const engineRef = useRef(null);
 
-  // --- CORE PHYSICS KERNEL (PURE FUNCTIONS) ---
-  
-  // 1. Analytic Launch Calculation (Energy Conservation)
-  // This removes the "Time Step" error from the swing phase.
-  // We calculate exactly what velocity the arm *should* have at release.
-  const calculateLaunchVector = (p) => {
-      const rad = p.angle * (Math.PI / 180);
-      const releaseTheta = (p.angle - 90) * (Math.PI / 180);
-      
-      // Rotational Inertia (I)
-      // I_arm (rod at end) = 1/3 ML^2
-      // I_proj (point mass) = mL^2
-      const I = (p.armMass * p.armLength**2)/3 + (p.projMass * p.armLength**2);
-      
-      // Energy stored in spring: PE = 0.5 * k * theta^2
-      // Theta is the swing arc. Start: -135deg, End: Release Angle.
-      // Approx Swing Arc ~ 2.3 radians (135 deg)
-      const swingArc = 2.3; 
-      const PE = 0.5 * p.tension * swingArc**2;
-      
-      // Efficiency loss (friction, air resistance on arm)
-      const efficiency = 0.4; 
-      const KE_usable = PE * efficiency;
-      
-      // KE = 0.5 * I * omega^2  => omega = sqrt(2*KE / I)
-      const omega = Math.sqrt( (2 * KE_usable) / I );
-      const vMag = omega * p.armLength;
-      
-      // Velocity Vector
-      const vel = {
-          x: Math.cos(rad) * vMag,
-          y: Math.sin(rad) * vMag,
-          z: 0
-      };
-      
-      // Precise Release Position
-      const pos = {
-          x: 0 + Math.cos(releaseTheta) * p.armLength,
-          y: 5.5 + Math.sin(releaseTheta) * p.armLength,
-          z: 0
-      };
+  // --- DETERMINISTIC PHYSICS KERNEL ---
+  const runPhysicsStep = (state, p, dt) => {
+     const vx = state.vel.x;
+     const vy = state.vel.y;
+     const vz = state.vel.z || 0;
+     
+     const vSq = vx*vx + vy*vy + vz*vz;
+     const v = Math.sqrt(vSq);
+     
+     const Fd = 0.5 * 1.225 * vSq * p.drag * 0.05; 
+     
+     const dirX = v > 0 ? (vx/v) : 0;
+     const dirY = v > 0 ? (vy/v) : 0;
 
-      return { pos, vel };
+     const ax = -(Fd * dirX + p.wind) / p.projMass;
+     const ay = -(Fd * dirY) / p.projMass - 9.81;
+     
+     state.vel.x += ax * dt;
+     state.vel.y += ay * dt;
+     state.pos.x += state.vel.x * dt;
+     state.pos.y += state.vel.y * dt;
+     if (state.pos.z !== undefined) state.pos.z += (state.vel.z || 0) * dt;
+     
+     return state;
   };
 
-  // 2. Flight Integrator (Deterministic)
-  const simulateFlightPath = (startPos, startVel, p) => {
-      let pos = { ...startPos };
-      let vel = { ...startVel };
-      const dt = 0.016; // Fixed step
-      
-      for(let i=0; i<5000; i++) {
-         const vSq = vel.x**2 + vel.y**2;
-         const v = Math.sqrt(vSq);
-         
-         // Quadratic Drag
-         const Fd = 0.5 * 1.225 * vSq * p.drag * 0.05; 
-         
-         // Acceleration
-         const ax = -(Fd * (vel.x/v) + p.wind) / p.projMass;
-         const ay = -(Fd * (vel.y/v)) / p.projMass - 9.81;
-         
-         vel.x += ax * dt;
-         vel.y += ay * dt;
-         pos.x += vel.x * dt;
-         pos.y += vel.y * dt;
-         
-         if(pos.y <= 0) return pos.x; // Ground hit
-      }
-      return pos.x;
-  };
-
-
-  // --- THE OMNI-SOLVER (V23) ---
+  // --- THE OMNI-SOLVER (v24) ---
   const runOptimizer = () => {
     setSolverState("CALCULATING");
     setAutoCorrected(false);
     
     setTimeout(() => {
-      
-      // Strategy: Binary Search Tension for Optimal Angle
-      // We know physics is monotonic for Tension (More Tension = More Distance)
-      const solveTensionForAngle = (targetAngle) => {
-         let min = 100, max = 150000; // Huge range
+      // 1. Simulation Helper
+      const simulateShot = (testTension, testAngle) => {
+        const dt = 0.016; 
+        const efficiency = 0.12; 
+        const swingArc = Math.PI / 2;
+        
+        const v0 = Math.sqrt( (testTension * swingArc**2 * efficiency) / specs.projMass );
+        const rad = testAngle * (Math.PI/180);
+        
+        // Exact Release Point Calculation
+        const releaseTheta = (testAngle - 90) * (Math.PI / 180);
+        const launchPos = {
+           x: 0 + Math.cos(releaseTheta) * specs.armLength,
+           y: 5.5 + Math.sin(releaseTheta) * specs.armLength,
+           z: 0
+        };
+
+        let sim = {
+          pos: launchPos, 
+          vel: { x: Math.cos(rad) * v0, y: Math.sin(rad) * v0, z: 0 }
+        };
+        
+        // Add X-offset from arm swing to simulation
+        // (Crucial for low angles/long arms)
+        
+        for(let i=0; i<3000; i++) {
+           sim = runPhysicsStep(sim, specs, dt);
+           if (sim.pos.y <= 0) break;
+        }
+        return sim.pos.x;
+      };
+
+      // 2. Binary Search Function
+      const searchTension = (angle) => {
+         let min = 10, max = 500000; // Massive range
          let bestT = min;
          let bestErr = Infinity;
-         
-         for(let i=0; i<40; i++) {
+
+         for(let i=0; i<50; i++) { // High precision iteration count
             const mid = (min + max) / 2;
-            
-            // 1. Get Launch Vector using Analytic Math
-            const launch = calculateLaunchVector({ ...specs, tension: mid, angle: targetAngle });
-            
-            // 2. Simulate Flight
-            const dist = simulateFlightPath(launch.pos, launch.vel, specs);
-            
-            const err = dist - specs.targetDist;
+            const r = simulateShot(mid, angle);
+            const err = r - specs.targetDist;
             
             if (Math.abs(err) < bestErr) {
                bestErr = Math.abs(err);
                bestT = mid;
             }
-            
             if (err > 0) max = mid; else min = mid;
          }
          return { t: bestT, err: bestErr };
       };
 
-      // 1. Try Current Angle
-      let solution = solveTensionForAngle(specs.angle);
+      // 3. Multi-Pass Optimization
+      let result = searchTension(specs.angle);
       let finalAngle = specs.angle;
 
-      // 2. If failed, Sweep ALL Angles to find physical possibility
-      if (solution.err > 1.0) {
-         let bestGlobal = solution;
-         let bestGlobalAngle = specs.angle;
+      if (result.err > 1.5) {
+         // If user angle fails, sweep ballistic optimals
+         let bestGlobal = result;
          
-         // Sweep 10 to 80 degrees
-         for (let a = 15; a <= 75; a += 5) {
-             const attempt = solveTensionForAngle(a);
-             if (attempt.err < bestGlobal.err) {
-                 bestGlobal = attempt;
-                 bestGlobalAngle = a;
-             }
-         }
+         [30, 45, 60, 20, 70].forEach(a => {
+            const attempt = searchTension(a);
+            if (attempt.err < bestGlobal.err) {
+               bestGlobal = attempt;
+               finalAngle = a;
+            }
+         });
          
          if (bestGlobal.err < 2.0) {
-             solution = bestGlobal;
-             finalAngle = bestGlobalAngle;
+             result = bestGlobal;
              setAutoCorrected(true);
          }
       }
 
-      setSpecs(s => ({ ...s, tension: Math.round(solution.t), angle: Math.round(finalAngle) }));
-      setSolverState("LOCKED");
-
+      setSpecs(s => ({ ...s, tension: Math.round(result.t), angle: Math.round(finalAngle) }));
+      setSolverState(result.err > 5.0 ? "IMPOSSIBLE" : "LOCKED");
     }, 500);
   };
 
   const generateTarget = () => {
     const dist = 50 + Math.random() * 400;
-    const wind = (Math.random() * 40) - 20; 
+    const wind = (Math.random() * 40) - 20;
     setSpecs(s => ({ ...s, targetDist: Math.floor(dist), wind: parseFloat(wind.toFixed(1)) }));
     setSolverState("IDLE");
     setSimState("READY");
@@ -204,14 +176,13 @@ export default function CatapultCommanderV23() {
     engineRef.current?.reset();
   };
 
-  // --- 3D Engine Initialization ---
+  // --- 3D Engine ---
   useEffect(() => {
     let frameId, isMounted = true, resizeObserver;
     const init = async () => {
       try {
         const THREE = await loadThreeJS();
         if (!isMounted || !containerRef.current) return;
-        
         const width = containerRef.current.clientWidth;
         const height = containerRef.current.clientHeight;
         const scene = new THREE.Scene();
@@ -271,7 +242,7 @@ export default function CatapultCommanderV23() {
 
         const state = {
           phase: "READY", pos: new THREE.Vector3(0,0,0), vel: new THREE.Vector3(0,0,0),
-          theta: -Math.PI / 4, trail: [], time: 0,
+          theta: -Math.PI / 4, omega: 0, time: 0, trail: [],
           camera: { radius: 80, theta: Math.PI/4, phi: Math.PI/3, center: new THREE.Vector3(0,10,0), dragging: false, lastMouse: {x:0, y:0} }
         };
 
@@ -304,8 +275,8 @@ export default function CatapultCommanderV23() {
 
         engineRef.current = {
           specs: specs,
-          fire: () => { state.phase = "FLIGHT_START"; state.trail = []; state.time = 0; setSimState("FIRED"); },
-          reset: () => { state.phase = "READY"; state.theta = -Math.PI * 0.8; state.trail = []; trailLine.geometry.setFromPoints([new THREE.Vector3(0,0,0)]); setSimState("READY"); }
+          fire: () => { state.phase = "SWING"; state.trail = []; state.time = 0; setSimState("FIRED"); },
+          reset: () => { state.phase = "READY"; state.omega = 0; state.theta = -Math.PI * 0.8; state.trail = []; trailLine.geometry.setFromPoints([new THREE.Vector3(0,0,0)]); setSimState("READY"); }
         };
 
         const animate = () => {
@@ -313,9 +284,8 @@ export default function CatapultCommanderV23() {
           frameId = requestAnimationFrame(animate);
           if (!engineRef.current) return;
           const p = engineRef.current.specs;
-          const dt = 0.016; 
+          const dt = 0.016;
           
-          // Visual Geometry Update
           const len = p.armLength;
           armBeam.scale.set(len, 1, 1); armBeam.position.set(-len/2, 0, 0); cup.position.set(-len, 0.8, 0);
           
@@ -332,37 +302,39 @@ export default function CatapultCommanderV23() {
              projectile.visible = true;
              projectile.position.copy(getCupPos(state.theta));
           } 
-          else if (state.phase === "FLIGHT_START") {
-             // Skip Swing Phase visual (since we compute purely analytically now for precision)
-             // We just snap to release
+          else if (state.phase === "SWING") {
+             const efficiency = 0.12; 
+             const swingArc = Math.PI / 2;
+             const vLaunch = Math.sqrt( (p.tension * swingArc**2 * efficiency) / p.projMass );
+             state.theta += 15 * dt;
+             
              const releaseTheta = (p.angle - 90) * (Math.PI / 180);
-             state.theta = releaseTheta;
-             armPivot.rotation.z = state.theta;
              
-             // Use SHARED Analytic Launch Math
-             const launch = calculateLaunchVector(p);
-             state.pos = new THREE.Vector3(launch.pos.x, launch.pos.y, launch.pos.z);
-             state.vel = new THREE.Vector3(launch.vel.x, launch.vel.y, launch.vel.z);
-             
-             state.phase = "FLIGHT";
-          }
+             if (state.theta >= releaseTheta) { 
+                state.phase = "FLIGHT"; 
+                state.theta = releaseTheta;
+                
+                const rad = p.angle * (Math.PI / 180);
+                state.vel.set(
+                  Math.cos(rad) * vLaunch, 
+                  Math.sin(rad) * vLaunch, 
+                  0
+                );
+                // SNAPSHOT: Ensure exact sync with solver start pos
+                const launchPos = getCupPos(state.theta);
+                state.pos.copy(launchPos);
+                projectile.position.copy(launchPos);
+             } else {
+                armPivot.rotation.z = state.theta;
+                projectile.position.copy(getCupPos(state.theta));
+             }
+          } 
           else if (state.phase === "FLIGHT") {
              state.time += dt;
-             // Arm Recoil Visual
-             armPivot.rotation.z = state.theta + Math.sin(state.time * 20) * 0.2 * Math.exp(-state.time);
+             armPivot.rotation.z = Math.PI/2 + Math.sin(state.time * 20) * 0.2 * Math.exp(-state.time);
+             
+             const nextState = runPhysicsStep(state, p, dt);
 
-             // Flight Integration
-             const vSq = state.vel.lengthSq();
-             const v = Math.sqrt(vSq);
-             
-             const Fd = 0.5 * 1.225 * vSq * p.drag * 0.05; 
-             const ax = -(Fd * (state.vel.x/v) + p.wind) / p.projMass;
-             const ay = -(Fd * (state.vel.y/v)) / p.projMass - 9.81;
-             
-             state.vel.x += ax * dt;
-             state.vel.y += ay * dt;
-             state.pos.add(state.vel.clone().multiplyScalar(dt));
-             
              if (state.pos.y <= 0) {
                state.pos.y = 0; state.phase = "IMPACT"; setSimState("IMPACT");
                const err = state.pos.x - p.targetDist;
@@ -375,7 +347,6 @@ export default function CatapultCommanderV23() {
              }
           }
 
-          // Camera
           const cx = state.camera.radius * Math.sin(state.camera.phi) * Math.sin(state.camera.theta);
           const cy = state.camera.radius * Math.cos(state.camera.phi);
           const cz = state.camera.radius * Math.sin(state.camera.phi) * Math.cos(state.camera.theta);
@@ -430,9 +401,7 @@ export default function CatapultCommanderV23() {
                  <div className="p-3 bg-slate-950 rounded border border-slate-800 space-y-3 relative overflow-hidden">
                     {solverState === "CALCULATING" && <div className="absolute inset-0 bg-cyan-500/10 animate-pulse"></div>}
                     <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase relative z-10"><span>Tactical Computer</span><Cpu className={`w-3 h-3 ${solverState === "LOCKED" ? "text-emerald-500" : "text-slate-600"}`} /></div>
-                    
                     {autoCorrected && <div className="text-[9px] text-amber-400 flex items-center"><AlertTriangle className="w-3 h-3 mr-1" /> Angle auto-corrected for range.</div>}
-                    
                     <button onClick={runOptimizer} disabled={solverState === "CALCULATING"} className={`w-full py-2 rounded text-[10px] font-bold flex items-center justify-center space-x-2 transition-all relative z-10 ${solverState === "LOCKED" ? "bg-emerald-900/30 text-emerald-400 border border-emerald-500/50" : "bg-cyan-600 hover:bg-cyan-500 text-white"}`}>{solverState === "CALCULATING" ? <RefreshCw className="w-3 h-3 animate-spin"/> : solverState === "LOCKED" ? <CheckCircle2 className="w-3 h-3"/> : <Activity className="w-3 h-3"/>}<span>{solverState === "LOCKED" ? "TARGET LOCKED" : "CALCULATE SOLUTION"}</span></button>
                  </div>
                  <div className="space-y-3 pt-2"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Mission Variables</h3><InputSlider label="Angle" value={specs.angle} min={10} max={80} onChange={v => setSpecs({...specs, angle: v})} unit="°" /><InputSlider label="Wind" value={specs.wind} min={-20} max={20} onChange={v => setSpecs({...specs, wind: v})} unit="m/s" color="text-red-400" /></div>
@@ -442,13 +411,13 @@ export default function CatapultCommanderV23() {
               <div className="space-y-5 animate-in fade-in slide-in-from-right-2">
                  <div className="p-3 bg-amber-900/10 border border-amber-500/20 rounded text-[10px] text-amber-200/80 leading-relaxed">Engineering Deck: Modifying these values alters the catapult's physics model.</div>
                  <div className="space-y-3"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Structural Specs</h3><InputSlider label="Arm Length" value={specs.armLength} min={3} max={10} step={0.5} onChange={v => setSpecs({...specs, armLength: v})} unit="m" color="text-amber-400" /><InputSlider label="Arm Mass" value={specs.armMass} min={10} max={100} onChange={v => setSpecs({...specs, armMass: v})} unit="kg" color="text-amber-400" /></div>
-                 <div className="space-y-3 pt-4 border-t border-slate-800"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Power Train</h3><InputSlider label="Tension" value={specs.tension} min={1000} max={80000} step={100} onChange={v => setSpecs({...specs, tension: v})} unit="N" color="text-emerald-400" /><InputSlider label="Payload Mass" value={specs.projMass} min={1} max={50} onChange={v => setSpecs({...specs, projMass: v})} unit="kg" /></div>
+                 <div className="space-y-3 pt-4 border-t border-slate-800"><h3 className="text-[10px] font-bold text-slate-500 uppercase">Power Train</h3><InputSlider label="Tension" value={specs.tension} min={1000} max={200000} step={100} onChange={v => setSpecs({...specs, tension: v})} unit="N" color="text-emerald-400" /><InputSlider label="Payload Mass" value={specs.projMass} min={1} max={50} onChange={v => setSpecs({...specs, projMass: v})} unit="kg" /></div>
               </div>
             )}
             {activeTab === "LOGS" && (
               <div className="space-y-3 animate-in fade-in slide-in-from-right-2">
                  <div className="flex justify-between items-center"><h3 className="text-[10px] font-bold text-emerald-500 uppercase">Flight Data</h3><button onClick={() => setFlightLogs([])} className="text-slate-500 hover:text-red-400"><Trash2 className="w-3 h-3" /></button></div>
-                 {flightLogs.length === 0 ? <div className="text-center text-slate-600 text-[10px] py-10 italic">No flight data recorded.</div> : <div className="space-y-2 max-h-[400px] overflow-y-auto">{flightLogs.map((log, i) => (<div key={log.id} className="bg-slate-950 border border-slate-800 rounded p-2 text-[10px] flex justify-between items-center"><span className="text-slate-500 font-mono w-4">#{i+1}</span><div><div className="text-white font-bold">{log.range}m</div><div className="text-slate-500">T:{log.tension} | A:{log.angle}°</div></div><div className={`font-mono font-bold ${Math.abs(log.error) < 5 ? "text-emerald-400" : "text-red-400"}`}>{log.error > 0 ? "+" : ""}{log.error}m</div></div>))}</div>}
+                 {flightLogs.length === 0 ? <div className="text-center text-slate-600 text-[10px] py-10 italic">No flight data recorded.</div> : <div className="space-y-2 max-h-[400px] overflow-y-auto">{flightLogs.map((log, i) => (<div key={log.id} className="bg-slate-950 border border-slate-800 rounded p-2 text-[10px] flex justify-between items-center"><span className="text-slate-500 font-mono w-4">#{i+1}</span><div><div className="text-white font-bold">{log.range}m</div><div className="text-slate-500">T:{log.tension} | A:{log.angle}°</div></div><div className={`font-mono font-bold ${Math.abs(log.error) < 3 ? "text-emerald-400" : "text-red-400"}`}>{log.error > 0 ? "+" : ""}{log.error}m</div></div>))}</div>}
               </div>
             )}
          </div>
